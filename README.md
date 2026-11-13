@@ -1,8 +1,16 @@
-# Transcribe — транскрипция аудио с разделением по спикерам
+<div align="center">
+  <img src="./project_icon.png" width="140" alt="Transcribe — иконка: звуковая волна превращается в реплики двух спикеров">
+  <h1>Transcribe</h1>
+  <p>Транскрипция аудио с разделением по спикерам: распознаёт речь (faster-whisper)<br>
+  и определяет, кто когда говорил (диаризация pyannote.audio).<br>
+  На выходе — текстовый файл с репликами и таймкодами.</p>
+  <img src="https://img.shields.io/static/v1?label=python&message=3.10-3.13&color=blue" alt="Python 3.10–3.13">
+  <img src="https://img.shields.io/static/v1?label=platform&message=Windows%20%7C%20Linux%20%7C%20macOS&color=lightgrey" alt="Платформы: Windows, Linux, macOS">
+</div>
 
-Скрипт на Python: распознаёт речь (Whisper) и определяет, кто когда говорил (диаризация pyannote). На выходе — текстовый файл с репликами, разбитыми по спикерам и с таймкодами.
+Пример фрагмента результата:
 
-```
+```text
 [00:03:15] SPEAKER_00: Добрый день, давайте начнём встречу.
 [00:03:22] SPEAKER_01: Здравствуйте, у меня пара вопросов по бюджету.
 ```
