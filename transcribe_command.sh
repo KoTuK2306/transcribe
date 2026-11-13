@@ -51,13 +51,14 @@ for f in *.mp3 *.mp4; do
         # Если это MP4, сначала извлекаем аудио
         temp_audio="temp_${f%.*}.mp3"
         echo ">> Извлечение аудио из видео..."
-        ffmpeg -y -i "$f" -vn -acodec libmp3lame -q:a 2 "$temp_audio" -loglevel error
-
-        if [ -f "$temp_audio" ]; then
+        # Успех проверяем по коду возврата ffmpeg, а не по факту файла:
+        # прерванное извлечение оставляет битый частичный mp3.
+        if ffmpeg -y -i "$f" -vn -acodec libmp3lame -q:a 2 "$temp_audio" -loglevel error; then
             python transcribe.py "$temp_audio" --out "${f%.*}.txt" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"
             rm -f "$temp_audio" # Удаляем временный файл
         else
             echo "!! Ошибка: не удалось извлечь аудио из $f"
+            rm -f "$temp_audio"
             ((failed++))
             continue
         fi
