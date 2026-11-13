@@ -61,8 +61,10 @@ echo "HF_TOKEN=hf_xxxxxxxx" > .env   # .env в .gitignore, в git не попа�
 
 Обрабатывает все `.mp3`/`.mp4` в текущей папке: из MP4 сначала извлекается
 аудио через ffmpeg, затем для каждого файла запускается транскрипция.
-Токен берётся из `.env` (см. выше). Скрипт закоммичен в репозиторий и безопасен
-для публикации — секретов в нём нет.
+Токен берётся из `.env` (см. выше), число спикеров — в первых строках скрипта
+(`MIN_SPEAKERS`/`MAX_SPEAKERS`, пустое значение = автоопределение).
+Транскрипт каждого файла сохраняется рядом с ним: `meeting.mp3` → `meeting.txt`.
+Скрипт закоммичен в репозиторий и безопасен для публикации — секретов в нём нет.
 
 ```bash
 bash transcribe_command.sh
@@ -82,8 +84,19 @@ python transcribe.py audio.mp3 --out transcript.txt --language ru --device cuda 
 | `--language`     | авто                | код языка: `ru`, `en`...                         |
 | `--device`       | cuda, если доступен | `cuda` или `cpu`                                 |
 | `--compute-type` | `float16`           | `float16` (GPU) / `int8` (CPU или экономия VRAM) |
+| `--min-speakers` | авто                | минимальное число спикеров (см. ниже)            |
+| `--max-speakers` | авто                | максимальное число спикеров (см. ниже)           |
 | `--cache-dir`    | `cache`             | модели и промежуточные результаты                |
 | `--no-cache`     | —                   | пересчитать всё заново                           |
+
+Про `--min-speakers`/`--max-speakers`: pyannote на длинных записях склонен дробить
+одного спикера на несколько кластеров (over-clustering) — типичный симптом: много
+«спикеров», суммарно говорящих по секунде-две. Если число участников известно,
+уточните его:
+
+```bash
+python transcribe.py meeting.mp3 --language ru --min-speakers 2 --max-speakers 2
+```
 
 Сценарии:
 
@@ -125,7 +138,7 @@ python transcribe.py meeting.mp3 --language ru --device cuda --compute-type int8
 | `Weights only load failed: Unsupported global pyannote...`                     | torch ≥ 2.6 грузит чекпоинты в безопасном режиме            | есть в скрипте (патч), либо связка версий из «Установки»                                                              |
 | `Could not load libtorchcodec`                                                 | pyannote 4.x + torchcodec на Windows                        | перейти на `pyannote.audio<4` (связка из «Установки»), либо ffmpeg **full-shared** с gyan.dev                         |
 | Очень долго                                                                    | CPU + large-v3                                              | `--device cuda` или `--model medium`                                                                                  |
-| Слишком много спикеров                                                         | pyannote дробит кластеры                                    | подставить имена вручную / уточнить параметры пайплайна                                                               |
+| Слишком много спикеров                                                         | pyannote дробит кластеры (over-clustering)                  | уточнить `--min-speakers`/`--max-speakers`, если число участников известно                                            |
 
 ## Скорость
 
