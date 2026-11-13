@@ -33,6 +33,20 @@ from transcribe.config import (
     hf_token_from_env,
     setup_environment,
 )
+from transcribe.output import (
+    bold,
+    cyan,
+    dim,
+    fmt_mmss,
+    fmt_timestamp,
+    green,
+    ok_line,
+    red,
+    separator,
+    stage_header,
+    yellow,
+)
+from transcribe.recognizer import transcribe_whisper
 
 # Окружение настраивается до импорта tqdm и любых тяжёлых зависимостей
 # (порядок критичен — см. transcribe/config.py).
@@ -59,67 +73,6 @@ _dll_dir_handles: list[Any] = []
 # Пороги склейки слов в реплики (см. group_into_lines).
 REPLY_MAX_GAP_SEC: float = 2.0
 REPLY_MAX_CHARS: int = 60
-
-# ANSI-коды выключены при перенаправлении вывода или по NO_COLOR (спека
-# no-color.org). Проверяется один раз на старте.
-_COLOR_ENABLED: bool = sys.stdout.isatty() and "NO_COLOR" not in os.environ
-
-# ---------------------------------------------------------------------------
-# Форматирование консольного вывода
-# ---------------------------------------------------------------------------
-
-
-def _paint(code: str, text: str) -> str:
-    """Обернуть текст в ANSI-последовательность, если цвет разрешён."""
-    return f"\033[{code}m{text}\033[0m" if _COLOR_ENABLED else text
-
-
-def cyan(text: str) -> str:
-    return _paint("36;1", text)
-
-
-def green(text: str) -> str:
-    return _paint("32;1", text)
-
-
-def yellow(text: str) -> str:
-    return _paint("33;1", text)
-
-
-def red(text: str) -> str:
-    return _paint("31;1", text)
-
-
-def dim(text: str) -> str:
-    return _paint("2", text)
-
-
-def bold(text: str) -> str:
-    return _paint("1", text)
-
-
-def fmt_mmss(seconds: float) -> str:
-    """Форматировать секунды как m:ss для человекочитаемого вывода."""
-    total = int(seconds)
-    return f"{total // 60}:{total % 60:02d}"
-
-
-def stage_header(index: int, title: str, subtitle: str = "") -> None:
-    """Печать заголовка этапа и его технических параметров."""
-    print()
-    print(f"{cyan(f'[{index}/2]')} {bold(title)}")
-    if subtitle:
-        print(f"        {dim(subtitle)}")
-
-
-def ok_line(text: str) -> None:
-    """Печать строки результата этапа."""
-    print(f"        {green('✓')} {text}")
-
-
-def separator() -> None:
-    print()
-    print(dim("─" * 60))
 
 # ---------------------------------------------------------------------------
 # Совместимость платформ и версий
@@ -196,72 +149,6 @@ def patch_torch_load_for_pyannote() -> None:
 
     extra = [obj for obj in vars(task_module).values() if isinstance(obj, type)]
     torch.serialization.add_safe_globals([TorchVersion, *extra])
-
-# ---------------------------------------------------------------------------
-# Этап 1: распознавание речи
-# ---------------------------------------------------------------------------
-
-
-def transcribe_whisper(
-    path: str,
-    model_size: str,
-    language: str | None,
-    device: str,
-    compute_type: str,
-    cache: StageCache,
-) -> tuple[list[dict], float, float | None]:
-    """Распознать речь и вернуть (слова, длительность_этапа, длительность_аудио).
-
-    Каждое слово — dict {start, end, text} в секундах от начала файла.
-    segments из faster-whisper — генератор: материализуем его, попутно
-    продвигая прогресс-бар по длительности аудио.
-    """
-    subtitle = f"{model_size} · {device}"
-    if device == "cpu":
-        compute_type = "int8"  # float16 на CPU не поддерживается CTranslate2
-        subtitle += " (int8; без GPU имеет смысл --model medium)"
-    else:
-        subtitle += f" ({compute_type})"
-
-    started = time.perf_counter()
-    cached = cache.load("whisper")
-    if cached is not None:
-        ok_line(f"Whisper: кэш, {len(cached)} слов")
-        return cached, time.perf_counter() - started, None
-
-    from faster_whisper import WhisperModel
-
-    stage_header(1, "Распознавание речи", subtitle)
-
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    segments, info = model.transcribe(
-        path,
-        language=language,
-        vad_filter=True,                 # пропускаем участки тишины/шума
-        word_timestamps=True,            # обязательно для привязки к спикерам
-        beam_size=5,
-        condition_on_previous_text=False,  # снижает галлюцинации на шумном входе
-    )
-
-    words: list[dict] = []
-    with tqdm(
-        total=round(info.duration, 1),
-        unit="сек",
-        desc="        ",
-        bar_format="{desc}{percentage:3.0f}% {bar} {n:.0f}/{total:.0f} · {elapsed}<{remaining}",
-        ncols=100,
-    ) as pbar:
-        for segment in segments:
-            for word in segment.words or []:
-                words.append({"start": word.start, "end": word.end, "text": word.word})
-            pbar.update(max(0.0, segment.end - pbar.n))
-
-    elapsed = time.perf_counter() - started
-    lang = f"{info.language} ({info.language_probability:.0%})"
-    ok_line(f"{len(words)} слов · язык {lang} · {fmt_mmss(elapsed)}")
-
-    cache.save("whisper", words)
-    return words, elapsed, info.duration
 
 # ---------------------------------------------------------------------------
 # Этап 2: диаризация
@@ -530,13 +417,6 @@ def group_into_lines(
     if current:
         lines.append(current)
     return lines
-
-
-def fmt_timestamp(seconds: float) -> str:
-    """Форматировать секунды как hh:mm:ss — таймкоды в выходном файле."""
-    minutes, secs = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 # ---------------------------------------------------------------------------
 # CLI и точка входа
