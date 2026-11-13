@@ -19,47 +19,24 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 from bisect import bisect_right
 import inspect
-import json
-import logging
 import os
 import sys
 import time
-import warnings
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Окружение: глушим шум тяжёлых зависимостей ДО их импорта.
-#
-# Порядок критичен: huggingface_hub читает HF_HUB_DISABLE_PROGRESS_BARS при
-# импорте, логгеры torch создаются при первом обращении, поэтому всё, что
-# можно выключить молча, выключается здесь, а не рядом с местом использования.
-# ---------------------------------------------------------------------------
+from transcribe.cache import StageCache, cache_key
+from transcribe.config import (
+    configure_hf_home,
+    cuda_available,
+    hf_token_from_env,
+    setup_environment,
+)
 
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-
-# Консоль Windows по умолчанию в cp1252/ cp1251: кириллица в print и
-# tqdm крашит прогон с UnicodeEncodeError. Принудительно переводим потоки
-# вывода в UTF-8 — это ничего не ломает при перенаправлении в файл.
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-
-warnings.filterwarnings("ignore", message=".*MPEG_LAYER_III subtype is unknown.*")
-warnings.filterwarnings("ignore", message=".*degrees of freedom is <= 0.*")
-warnings.filterwarnings("ignore", message=".*TensorFloat-32.*")
-
-for _logger_name in (
-    "torch.utils.flop_counter",  # "triton not found; flop counting..." на Windows
-    "torch._dynamo",
-    "torch._inductor",
-    "torch.cuda.graphs",
-    "lightning_fabric",
-    "lightning",
-):
-    logging.getLogger(_logger_name).setLevel(logging.ERROR)
+# Окружение настраивается до импорта tqdm и любых тяжёлых зависимостей
+# (порядок критичен — см. transcribe/config.py).
+setup_environment()
 
 from tqdm import tqdm
 
@@ -221,59 +198,8 @@ def patch_torch_load_for_pyannote() -> None:
     torch.serialization.add_safe_globals([TorchVersion, *extra])
 
 # ---------------------------------------------------------------------------
-# Кэш результатов этапов
-#
-# Ключ — срез SHA-1 от абсолютного пути входа и параметров этапа: любое
-# изменение входа или конфигурации инвалидирует кэш автоматически.
-# ---------------------------------------------------------------------------
-
-
-def cache_key(audio_path: str, *parts: Any) -> str:
-    """Построить ключ кэша из пути к аудио и параметров запуска."""
-    digest = hashlib.sha1()
-    digest.update(os.path.abspath(audio_path).encode("utf-8"))
-    for part in parts:
-        digest.update(str(part).encode("utf-8"))
-    return digest.hexdigest()[:16]
-
-
-def load_cache(cache_dir: str, key: str, stage: str) -> list[dict] | None:
-    """Прочитать сохранённый результат этапа; None, если кэша нет.
-
-    Битый JSON (прерванная запись) трактуем как отсутствие кэша:
-    этап просто пересчитается, вместо падения прогона трейсбэком.
-    """
-    path = os.path.join(cache_dir, f"{key}.{stage}.json")
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-
-
-def save_cache(cache_dir: str, key: str, stage: str, data: list[dict]) -> None:
-    """Сохранить результат этапа; каталог создаётся при необходимости."""
-    os.makedirs(cache_dir, exist_ok=True)
-    path = os.path.join(cache_dir, f"{key}.{stage}.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False)
-
-# ---------------------------------------------------------------------------
 # Этап 1: распознавание речи
 # ---------------------------------------------------------------------------
-
-
-def cuda_available() -> bool:
-    """True, если torch видит CUDA-устройство. Импорт внутри функции,
-    чтобы не тянуть torch ради одной проверки."""
-    try:
-        import torch
-
-        return torch.cuda.is_available()
-    except Exception:
-        return False
 
 
 def transcribe_whisper(
@@ -282,8 +208,7 @@ def transcribe_whisper(
     language: str | None,
     device: str,
     compute_type: str,
-    cache_dir: str | None,
-    key: str,
+    cache: StageCache,
 ) -> tuple[list[dict], float, float | None]:
     """Распознать речь и вернуть (слова, длительность_этапа, длительность_аудио).
 
@@ -299,7 +224,7 @@ def transcribe_whisper(
         subtitle += f" ({compute_type})"
 
     started = time.perf_counter()
-    cached = None if cache_dir is None else load_cache(cache_dir, key, "whisper")
+    cached = cache.load("whisper")
     if cached is not None:
         ok_line(f"Whisper: кэш, {len(cached)} слов")
         return cached, time.perf_counter() - started, None
@@ -335,8 +260,7 @@ def transcribe_whisper(
     lang = f"{info.language} ({info.language_probability:.0%})"
     ok_line(f"{len(words)} слов · язык {lang} · {fmt_mmss(elapsed)}")
 
-    if cache_dir is not None:
-        save_cache(cache_dir, key, "whisper", words)
+    cache.save("whisper", words)
     return words, elapsed, info.duration
 
 # ---------------------------------------------------------------------------
@@ -424,8 +348,7 @@ def diarize(
     path: str,
     hf_token: str | None,
     device: str,
-    cache_dir: str | None,
-    key: str,
+    cache: StageCache,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
 ) -> tuple[list[dict], float]:
@@ -439,7 +362,7 @@ def diarize(
     непосредственно перед импортом pyannote (см. требования к порядку).
     """
     started = time.perf_counter()
-    cached = None if cache_dir is None else load_cache(cache_dir, key, "diarization")
+    cached = cache.load("diarization")
     if cached is not None:
         ok_line(f"Диаризация: кэш, {len(cached)} фрагментов")
         return cached, time.perf_counter() - started
@@ -530,8 +453,7 @@ def diarize(
     elapsed = time.perf_counter() - started
     ok_line(f"{len(turns)} фрагментов · {fmt_mmss(elapsed)}")
 
-    if cache_dir is not None:
-        save_cache(cache_dir, key, "diarization", turns)
+    cache.save("diarization", turns)
     return turns, elapsed
 
 # ---------------------------------------------------------------------------
@@ -634,7 +556,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--language", default=None,
                         help="язык, например ru / en (по умолчанию автоопределение)")
-    parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
+    parser.add_argument("--hf-token", default=hf_token_from_env(),
                         help="токен HuggingFace для pyannote")
     parser.add_argument("--device", default="cuda" if cuda_available() else "cpu",
                         help="cuda или cpu")
@@ -654,11 +576,7 @@ def main() -> None:
     if not os.path.exists(args.audio):
         sys.exit(f"{red('Файл не найден:')} {args.audio}")
 
-    # HF_HOME читается huggingface_hub при импорте, поэтому задаём до
-    # импорта любых зависимостей, использующих его (Whisper, pyannote).
-    os.environ.setdefault(
-        "HF_HOME", os.path.abspath(os.path.join(args.cache_dir, "hf"))
-    )
+    configure_hf_home(args.cache_dir)
 
     device_label = args.device
     if args.device == "cuda" and not cuda_available():
@@ -682,23 +600,25 @@ def main() -> None:
         sys.exit(f"{red('Ошибка:')} --min-speakers ({args.min_speakers}) больше "
                  f"--max-speakers ({args.max_speakers})")
 
-    cache_dir = None if args.no_cache else args.cache_dir
     # На CPU compute_type всегда int8 (см. transcribe_whisper), поэтому
     # ключ кэша строим от фактического значения, а не от сырого аргумента —
     # иначе float16/int8 на CPU давали бы два кэша одного результата.
     effective_compute_type = "int8" if args.device == "cpu" else args.compute_type
-    key = cache_key(
-        args.audio, args.model, args.language, effective_compute_type, args.device,
-        args.min_speakers, args.max_speakers,
+    cache = StageCache(
+        None if args.no_cache else args.cache_dir,
+        cache_key(
+            args.audio, args.model, args.language, effective_compute_type, args.device,
+            args.min_speakers, args.max_speakers,
+        ),
     )
 
     started = time.perf_counter()
     words, time_whisper, duration = transcribe_whisper(
         args.audio, args.model, args.language, args.device,
-        args.compute_type, cache_dir, key,
+        args.compute_type, cache,
     )
     turns, time_diarization = diarize(
-        args.audio, args.hf_token, args.device, cache_dir, key,
+        args.audio, args.hf_token, args.device, cache,
         min_speakers=args.min_speakers, max_speakers=args.max_speakers,
     )
     time_assign = assign_speakers(words, turns)
