@@ -1,0 +1,3 @@
+# Скрипты обязаны быть в LF: CRLF ломает выполнение bash-скриптов
+# (ошибки вида "\r: command not found") при любом checkout на Windows.
+*.sh text eol=lf
