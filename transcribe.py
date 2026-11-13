@@ -234,12 +234,19 @@ def cache_key(audio_path: str, *parts: Any) -> str:
 
 
 def load_cache(cache_dir: str, key: str, stage: str) -> list[dict] | None:
-    """Прочитать сохранённый результат этапа; None, если кэша нет."""
+    """Прочитать сохранённый результат этапа; None, если кэша нет.
+
+    Битый JSON (прерванная запись) трактуем как отсутствие кэша:
+    этап просто пересчитается, вместо падения прогона трейсбэком.
+    """
     path = os.path.join(cache_dir, f"{key}.{stage}.json")
     if not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def save_cache(cache_dir: str, key: str, stage: str, data: list[dict]) -> None:
@@ -672,8 +679,12 @@ def main() -> None:
                  f"--max-speakers ({args.max_speakers})")
 
     cache_dir = None if args.no_cache else args.cache_dir
+    # На CPU compute_type всегда int8 (см. transcribe_whisper), поэтому
+    # ключ кэша строим от фактического значения, а не от сырого аргумента —
+    # иначе float16/int8 на CPU давали бы два кэша одного результата.
+    effective_compute_type = "int8" if args.device == "cpu" else args.compute_type
     key = cache_key(
-        args.audio, args.model, args.language, args.compute_type, args.device,
+        args.audio, args.model, args.language, effective_compute_type, args.device,
         args.min_speakers, args.max_speakers,
     )
 
@@ -696,11 +707,16 @@ def main() -> None:
 
     # Нумерация спикеров по убыванию говорливости: SPEAKER_00 — самый
     # активный; человеческие имена подставляются поиском-заменой по файлу.
+    # UNKNOWN (слова вне любого интервала диаризации) не переименовываем,
+    # чтобы в выводе отличать непривязанные слова от реальных спикеров.
     counts: dict[str, int] = {}
     for line in lines:
         counts[line["speaker"]] = counts.get(line["speaker"], 0) + 1
     order = sorted(counts, key=counts.get, reverse=True)
-    rename = {sp: f"SPEAKER_{i:02d}" for i, sp in enumerate(order)}
+    rename = {
+        sp: (sp if sp == "UNKNOWN" else f"SPEAKER_{i:02d}")
+        for i, sp in enumerate(order)
+    }
 
     with open(args.out, "w", encoding="utf-8") as fh:
         for line in lines:
