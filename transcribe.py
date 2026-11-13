@@ -75,6 +75,10 @@ FFMPEG_BIN_CANDIDATES: tuple[str, ...] = (
     r"C:\ffmpeg\bin",
 )
 
+# Хендлы os.add_dll_directory: без ссылки на них каталог тут же выводится
+# из поиска DLL сборщиком мусора, и патч для torchcodec превращается в no-op.
+_dll_dir_handles: list[Any] = []
+
 # Пороги склейки слов в реплики (см. group_into_lines).
 REPLY_MAX_GAP_SEC: float = 2.0
 REPLY_MAX_CHARS: int = 60
@@ -166,7 +170,7 @@ def register_ffmpeg_dll_dirs() -> None:
         candidates.insert(0, os.path.dirname(ffmpeg_exe))
     for path in candidates:
         if os.path.isdir(path):
-            os.add_dll_directory(path)
+            _dll_dir_handles.append(os.add_dll_directory(path))
 
 
 def patch_torchaudio_for_pyannote3() -> None:
