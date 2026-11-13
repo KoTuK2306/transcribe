@@ -19,10 +19,10 @@
 Рабочая проверенная связка версий (важно ставить именно её, см. «Устранение проблем»):
 
 ```bash
-pip install faster-whisper pyannote.audio torch torchaudio tqdm
+pip install faster-whisper "pyannote.audio==3.4.0" tqdm   # 3.4.0: версия 4.x требует ffmpeg/torchcodec — см. «Устранение проблем»
 pip install "av<19"                      # PyAV 19 ломает faster-whisper 1.2.1
 pip install "huggingface_hub<1.0"        # hub 1.x убрал use_auth_token, нужный pyannote 3.x
-pip install --force-reinstall "torch==2.7.1" "torchaudio==2.7.1"     --index-url https://download.pytorch.org/whl/cu128   # для GPU NVIDIA
+pip install --force-reinstall "torch==2.7.1" "torchaudio==2.7.1" --index-url https://download.pytorch.org/whl/cu128   # для GPU NVIDIA
 ```
 
 Проверка CUDA:
