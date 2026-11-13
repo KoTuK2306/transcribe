@@ -371,7 +371,11 @@ def load_audio_mono16k(path: str) -> Any:
         os.unlink(tmp.name)
 
 
-def run_pipeline_with_progress(pipeline: Any, path: str) -> Any:
+def run_pipeline_with_progress(
+    pipeline: Any,
+    path: str,
+    speaker_count_kwargs: dict[str, int],
+) -> Any:
     """Выполнить диаризацию по аудио, один раз загруженному в память.
 
     На этапе embeddings pyannote запрашивает тысячи перекрывающихся окон.
@@ -379,6 +383,8 @@ def run_pipeline_with_progress(pipeline: Any, path: str) -> Any:
     отдельно; на длинных записях это может занимать намного больше времени,
     чем сама нейросетевая обработка. Поэтому заранее декодируем файл
     в моно 16 кГц (load_audio_mono16k сама разбирается с видеоконтейнерами).
+    speaker_count_kwargs — min_speakers/max_speakers: главный рычаг против
+    over-clustering, когда pyannote дробит одного спикера на кластеры.
     """
     waveform, sample_rate = load_audio_mono16k(path)
     audio_file = {
@@ -391,10 +397,10 @@ def run_pipeline_with_progress(pipeline: Any, path: str) -> Any:
         from pyannote.audio.pipelines.utils.hook import ProgressHook
     except ImportError:
         # Совместимость с версиями pyannote без ProgressHook.
-        return pipeline(audio_file)
+        return pipeline(audio_file, **speaker_count_kwargs)
 
     with ProgressHook() as hook:
-        return pipeline(audio_file, hook=hook)
+        return pipeline(audio_file, hook=hook, **speaker_count_kwargs)
 
 
 def torch_device(index: int) -> Any:
@@ -409,11 +415,16 @@ def diarize(
     device: str,
     cache_dir: str | None,
     key: str,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
 ) -> tuple[list[dict], float]:
     """Определить спикеров и вернуть (интервалы, длительность_этапа).
 
     Каждый интервал — dict {start, end, speaker} с непересекающимися
-    отрезками одного спикера. Патчи совместимости применяются здесь,
+    отрезками одного спикера. min_speakers/max_speakers передаются в
+    пайплайн как есть (None = авто): на длинных записях pyannote склонен
+    дробить спикеров на лишние кластеры, и ограничение числа спикеров —
+    самое надёжное лекарство. Патчи совместимости применяются здесь,
     непосредственно перед импортом pyannote (см. требования к порядку).
     """
     started = time.perf_counter()
@@ -485,14 +496,20 @@ def diarize(
             )
 
     print(f"        {dim('Этапы пайплайна:')}")
+    speaker_count_kwargs: dict[str, int] = {}
+    if min_speakers is not None:
+        speaker_count_kwargs["min_speakers"] = min_speakers
+    if max_speakers is not None:
+        speaker_count_kwargs["max_speakers"] = max_speakers
     try:
-        diarization = run_pipeline_with_progress(pipeline, path)
+        diarization = run_pipeline_with_progress(pipeline, path, speaker_count_kwargs)
     except Exception as exc:
         sys.exit(
             f"{red('Ошибка во время диаризации:')} {type(exc).__name__}: {exc}\n"
             f"        Типичные причины: формат не поддержан декодером pyannote\n"
             f"        (нужен ffmpeg в PATH), ошибка torchcodec (нужен ffmpeg с DLL\n"
-            f"        или pyannote.audio<4), нехватка VRAM (см. README.md)"
+            f"        или pyannote.audio<4), нехватка VRAM. Если спикеров слишком\n"
+            f"        много/мало — уточните --min-speakers/--max-speakers (см. README.md)"
         )
     turns = [
         {"start": turn.start, "end": turn.end, "speaker": speaker}
@@ -611,6 +628,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if cuda_available() else "cpu",
                         help="cuda или cpu")
     parser.add_argument("--compute-type", default="float16", help="float16 или int8")
+    parser.add_argument("--min-speakers", type=int, default=None,
+                        help="минимальное число спикеров (по умолчанию авто)")
+    parser.add_argument("--max-speakers", type=int, default=None,
+                        help="максимальное число спикеров (по умолчанию авто)")
     parser.add_argument("--cache-dir", default="cache", help="папка кэша")
     parser.add_argument("--no-cache", action="store_true",
                         help="игнорировать кэш и пересчитать всё")
@@ -645,15 +666,26 @@ def main() -> None:
     if not args.no_cache:
         print(f"        кэш:      {args.cache_dir}/")
 
+    if args.min_speakers is not None and args.max_speakers is not None \
+            and args.min_speakers > args.max_speakers:
+        sys.exit(f"{red('Ошибка:')} --min-speakers ({args.min_speakers}) больше "
+                 f"--max-speakers ({args.max_speakers})")
+
     cache_dir = None if args.no_cache else args.cache_dir
-    key = cache_key(args.audio, args.model, args.language, args.compute_type, args.device)
+    key = cache_key(
+        args.audio, args.model, args.language, args.compute_type, args.device,
+        args.min_speakers, args.max_speakers,
+    )
 
     started = time.perf_counter()
     words, time_whisper, duration = transcribe_whisper(
         args.audio, args.model, args.language, args.device,
         args.compute_type, cache_dir, key,
     )
-    turns, time_diarization = diarize(args.audio, args.hf_token, args.device, cache_dir, key)
+    turns, time_diarization = diarize(
+        args.audio, args.hf_token, args.device, cache_dir, key,
+        min_speakers=args.min_speakers, max_speakers=args.max_speakers,
+    )
     time_assign = assign_speakers(words, turns)
 
     lines = group_into_lines(words)
