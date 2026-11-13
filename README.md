@@ -87,8 +87,8 @@ python transcribe.py meeting.mp3 --language ru --device cuda --compute-type floa
 | `--out`          | `transcript.txt`      | куда сохранить результат                         |
 | `--model`        | `large-v3`            | tiny / base / small / medium / large-v3          |
 | `--language`     | авто                  | код языка: `ru`, `en`...                         |
-| `--device`       | cuda, если доступен   | `cuda` или `cpu`                                 |
-| `--compute-type` | `float16`             | `float16` (GPU) / `int8` (CPU или экономия VRAM) |
+| `--device`       | cuda, если доступен   | `cuda` или `cpu`; недоступная CUDA — авто-переключение на `cpu` |
+| `--compute-type` | `float16`             | `float16` (GPU) / `int8`; на CPU принудительно `int8` |
 | `--min-speakers` | авто                  | минимальное число спикеров (см. ниже)            |
 | `--max-speakers` | авто                  | максимальное число спикеров (см. ниже)           |
 | `--cache-dir`    | `cache`               | модели и промежуточные результаты                |
