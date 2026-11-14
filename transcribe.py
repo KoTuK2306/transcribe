@@ -19,11 +19,11 @@
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_right
 import os
 import sys
 import time
 
+from transcribe.aligner import assign_speakers, group_into_lines
 from transcribe.cache import StageCache, cache_key
 from transcribe.config import (
     configure_hf_home,
@@ -33,108 +33,19 @@ from transcribe.config import (
 )
 from transcribe.output import (
     bold,
+    build_speaker_rename,
     cyan,
-    dim,
-    fmt_mmss,
-    fmt_timestamp,
-    green,
-    ok_line,
+    print_summary,
     red,
-    separator,
-    stage_header,
+    write_transcript,
     yellow,
 )
-from transcribe.recognizer import transcribe_whisper
 from transcribe.diarizer import diarize
+from transcribe.recognizer import transcribe_whisper
 
-# Окружение настраивается до импорта tqdm и любых тяжёлых зависимостей
+# Окружение настраивается до импорта любых тяжёлых зависимостей
 # (порядок критичен — см. transcribe/config.py).
 setup_environment()
-
-from tqdm import tqdm
-
-# ---------------------------------------------------------------------------
-# Константы
-# ---------------------------------------------------------------------------
-
-# Пороги склейки слов в реплики (см. group_into_lines).
-REPLY_MAX_GAP_SEC: float = 2.0
-REPLY_MAX_CHARS: int = 60
-
-# ---------------------------------------------------------------------------
-# Слияние: слова + интервалы спикеров -> реплики
-# ---------------------------------------------------------------------------
-
-
-def assign_speakers(words: list[dict], speaker_turns: list[dict]) -> float:
-    """Назначить каждому слову спикера по максимальному временному пересечению.
-
-    Слова и интервалы из разных моделей слегка расходятся по границам,
-    поэтому берётся не «спикер интервала, в который попал старт слова»,
-    а максимум пересечения — это устойчиво к смещениям до ~сотен мс.
-    Слова вне любого интервала остаются UNKNOWN.
-
-    Интервалы одного спикера не пересекаются, поэтому кандидатов на
-    пересечение с любым словом — единицы. Двоичный поиск по стартам
-    интервалов + обратный проход до первого непересекающегося даёт
-    линейное суммарное время вместо квадратичного (слово × интервалы).
-    """
-    started = time.perf_counter()
-    turns = sorted(speaker_turns, key=lambda turn: turn["start"])
-    turn_starts = [turn["start"] for turn in turns]
-    for word in tqdm(
-        words,
-        desc="        привязка слов",
-        bar_format="{desc} {percentage:3.0f}% {bar} {n}/{total} · {elapsed}",
-        ncols=100,
-    ):
-        best, best_overlap = "UNKNOWN", 0.0
-        # turns с start <= word.end; дальше в списке пересечение невозможно.
-        candidate = bisect_right(turn_starts, word["end"]) - 1
-        while candidate >= 0 and turns[candidate]["end"] > word["start"]:
-            turn = turns[candidate]
-            overlap = min(word["end"], turn["end"]) - max(word["start"], turn["start"])
-            if overlap > best_overlap:
-                best, best_overlap = turn["speaker"], overlap
-            candidate -= 1
-        word["speaker"] = best
-    return time.perf_counter() - started
-
-
-def group_into_lines(
-    words: list[dict],
-    max_gap: float = REPLY_MAX_GAP_SEC,
-    max_len: int = REPLY_MAX_CHARS,
-) -> list[dict]:
-    """Склеить слова в реплики.
-
-    Новая реплика начинается при смене спикера или паузе длиннее max_gap.
-    Длинные реплики принудительно разбиваются по max_len символов, чтобы
-    строки в файле оставались читабельными.
-    """
-    lines: list[dict] = []
-    current: dict | None = None
-    for word in words:
-        new_speaker = current is None or word["speaker"] != current["speaker"]
-        gap = current is not None and (word["start"] - current["end"]) > max_gap
-        if new_speaker or gap:
-            if current:
-                lines.append(current)
-            current = {
-                "speaker": word["speaker"],
-                "start": word["start"],
-                "end": word["end"],
-                "text": word["text"].strip(),
-            }
-        else:
-            current["text"] += " " + word["text"].strip()
-            current["end"] = word["end"]
-        if current and len(current["text"]) > max_len:
-            lines.append(current)
-            current = None
-    if current:
-        lines.append(current)
-    return lines
 
 # ---------------------------------------------------------------------------
 # CLI и точка входа
@@ -227,39 +138,21 @@ def main() -> None:
     if not lines:
         sys.exit(f"{red('Ничего не распознано')} — проверьте качество аудио")
 
-    # Нумерация спикеров по убыванию говорливости: SPEAKER_00 — самый
-    # активный; человеческие имена подставляются поиском-заменой по файлу.
-    # UNKNOWN (слова вне любого интервала диаризации) не переименовываем,
-    # чтобы в выводе отличать непривязанные слова от реальных спикеров.
-    counts: dict[str, int] = {}
-    for line in lines:
-        counts[line["speaker"]] = counts.get(line["speaker"], 0) + 1
-    order = sorted(counts, key=counts.get, reverse=True)
-    rename = {
-        sp: (sp if sp == "UNKNOWN" else f"SPEAKER_{i:02d}")
-        for i, sp in enumerate(order)
-    }
-
-    with open(args.out, "w", encoding="utf-8") as fh:
-        for line in lines:
-            fh.write(f"[{fmt_timestamp(line['start'])}] {rename[line['speaker']]}: {line['text']}\n")
+    rename = build_speaker_rename(lines)
+    write_transcript(args.out, lines, rename)
 
     duration = duration or max(word["end"] for word in words)
-    separator()
-    print(f"  {green('✓ Готово')}")
-    print(f"        результат:    {bold(args.out)}")
-    print(
-        f"        длительность: {fmt_mmss(duration)} · слов: {len(words)}"
-        f" · реплик: {len(lines)}"
+    print_summary(
+        out_path=args.out,
+        duration=duration,
+        words=words,
+        lines=lines,
+        rename=rename,
+        time_whisper=time_whisper,
+        time_diarization=time_diarization,
+        time_assign=time_assign,
+        total=total,
     )
-    print(f"        спикеры:      {', '.join(rename.values())} ({len(rename)})")
-    print(
-        f"        время:        распознавание {fmt_mmss(time_whisper)} · "
-        f"диаризация {fmt_mmss(time_diarization)} · "
-        f"привязка {fmt_mmss(time_assign)} · всего {fmt_mmss(total)}"
-    )
-    separator()
-    print()
 
 
 if __name__ == "__main__":
