@@ -14,7 +14,7 @@ import time
 from transcribe.aligner import assign_speakers, group_into_lines
 from transcribe.cache import StageCache, cache_key
 from transcribe.config import configure_hf_home, cuda_available, hf_token_from_env
-from transcribe.diarizer import diarize
+from transcribe.diarizer import DIARIZATION_MODEL, diarize
 from transcribe.output import (
     bold,
     build_speaker_rename,
@@ -84,14 +84,25 @@ def main() -> None:
         sys.exit(f"{red('Ошибка:')} --min-speakers ({args.min_speakers}) больше "
                  f"--max-speakers ({args.max_speakers})")
 
-    # На CPU compute_type всегда int8 (см. transcribe_whisper), поэтому
-    # ключ кэша строим от фактического значения, а не от сырого аргумента —
-    # иначе float16/int8 на CPU давали бы два кэша одного результата.
+    # Ключи кэша строим отдельно для каждого этапа и от идентификаторов
+    # моделей: смена модели (Whisper или pyannote) должна инвалидировать
+    # только её кэш, а не весь. На CPU compute_type всегда int8
+    # (см. transcribe_whisper), поэтому ключ строим от фактического
+    # значения, а не от сырого аргумента — иначе float16/int8 на CPU давали
+    # бы два кэша одного результата.
     effective_compute_type = "int8" if args.device == "cpu" else args.compute_type
-    cache = StageCache(
-        None if args.no_cache else args.cache_dir,
+    cache_dir = None if args.no_cache else args.cache_dir
+    whisper_cache = StageCache(
+        cache_dir,
         cache_key(
-            args.audio, args.model, args.language, effective_compute_type, args.device,
+            args.audio, "whisper", args.model, args.language,
+            effective_compute_type, args.device,
+        ),
+    )
+    diarization_cache = StageCache(
+        cache_dir,
+        cache_key(
+            args.audio, "diarization", DIARIZATION_MODEL, args.device,
             args.min_speakers, args.max_speakers,
         ),
     )
@@ -99,10 +110,10 @@ def main() -> None:
     started = time.perf_counter()
     words, time_whisper, duration = transcribe_whisper(
         args.audio, args.model, args.language, args.device,
-        args.compute_type, cache,
+        args.compute_type, whisper_cache,
     )
     turns, time_diarization = diarize(
-        args.audio, args.hf_token, args.device, cache,
+        args.audio, args.hf_token, args.device, diarization_cache,
         min_speakers=args.min_speakers, max_speakers=args.max_speakers,
     )
     time_assign = assign_speakers(words, turns)
