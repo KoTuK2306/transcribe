@@ -117,7 +117,7 @@ python transcribe.py meeting.mp3 --language ru --device cuda --compute-type int8
 
 ## Пакетная обработка (transcribe_command.sh)
 
-Обрабатывает все `.mp3`/`.mp4` в папке проекта: из MP4 сначала извлекается аудио через ffmpeg, транскрипт каждого файла сохраняется рядом с ним: `meeting.mp3` → `meeting.txt`. Токен берётся из `.env` (см. [«Токен HuggingFace»](#токен-huggingface)), число спикеров задаётся в первых строках скрипта (`MIN_SPEAKERS`/`MAX_SPEAKERS`, пустое значение = автоопределение).
+Кладёте файлы в `input/` — транскрипты появляются в `output/`: `input/meeting.mp3` → `output/meeting.txt`. Обрабатывает все `.mp3`/`.mp4` из `input/` (регистр расширения не важен): из MP4 сначала извлекается аудио через ffmpeg. Папки создаются автоматически, обе в `.gitignore`. Токен берётся из `.env` (см. [«Токен HuggingFace»](#токен-huggingface)), число спикеров задаётся в первых строках скрипта (`MIN_SPEAKERS`/`MAX_SPEAKERS`, пустое значение = автоопределение).
 
 ```bash
 bash transcribe_command.sh
@@ -144,7 +144,9 @@ bash transcribe_command.sh
 │   ├── cache.py             # кэш результатов этапов (StageCache)
 │   ├── config.py            # окружение, CUDA, HF_TOKEN
 │   └── output.py            # форматирование консоли и итогового транскрипта
-├── transcribe_command.sh    # пакетная обработка mp3/mp4 в папке проекта
+├── transcribe_command.sh    # пакетная обработка: input/ → output/
+├── input/                   # сюда кладутся mp3/mp4 для обработки (в .gitignore)
+├── output/                  # готовые транскрипты (в .gitignore)
 └── cache/                   # модели и результаты этапов (в .gitignore)
 ```
 
