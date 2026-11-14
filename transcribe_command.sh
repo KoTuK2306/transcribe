@@ -7,6 +7,12 @@
 # Токен: https://huggingface.co/settings/tokens (тип Read);
 # также нужно принять условия gated-моделей pyannote (см. README.md).
 
+# Падать при первой непредвиденной ошибке (нехватка прав, отсутствующие
+# команды), а не продолжать полуразобранный прогон. Ожидаемые ошибки —
+# ffmpeg и transcribe.py — перехватываются явно через if ниже, поэтому
+# обработка файлов продолжается, а счётчики ok/failed ведутся как раньше.
+set -e
+
 # Работаем в папке скрипта: отсюда берутся .env и папки input/output,
 # независимо от того, откуда запущен скрипт.
 cd "$(dirname "$0")" || exit 1
@@ -37,8 +43,12 @@ mkdir -p "$INPUT_DIR" "$OUTPUT_DIR"
 
 # Собираем аргументы для transcribe.py из настроек выше
 SPEAKER_ARGS=()
-[ -n "$MIN_SPEAKERS" ] && SPEAKER_ARGS+=(--min-speakers "$MIN_SPEAKERS")
-[ -n "$MAX_SPEAKERS" ] && SPEAKER_ARGS+=(--max-speakers "$MAX_SPEAKERS")
+if [ -n "$MIN_SPEAKERS" ]; then
+    SPEAKER_ARGS+=(--min-speakers "$MIN_SPEAKERS")
+fi
+if [ -n "$MAX_SPEAKERS" ]; then
+    SPEAKER_ARGS+=(--max-speakers "$MAX_SPEAKERS")
+fi
 
 # python transcribe.py 1102.MP3 --out transcript.txt --language ru --device cuda --compute-type float16
 
@@ -60,7 +70,9 @@ failed=0   # файлов с ошибкой
 for f in "${files[@]}"; do
     # Очищаем экран только при интерактивном запуске: при перенаправлении
     # вывода в файл escape-последовательности clear засорили бы его.
-    [ -t 1 ] && clear
+    if [ -t 1 ]; then
+        clear
+    fi
     echo "=== $(basename "$f") ==="
 
     name="$(basename "${f%.*}")"
@@ -74,25 +86,28 @@ for f in "${files[@]}"; do
         # Успех проверяем по коду возврата ffmpeg, а не по факту файла:
         # прерванное извлечение оставляет битый частичный mp3.
         if ffmpeg -y -i "$f" -vn -acodec libmp3lame -q:a 2 "$temp_audio" -loglevel error; then
-            python transcribe.py "$temp_audio" --out "$out" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"
-            rm -f "$temp_audio" # Удаляем временный файл
+            # Временный файл удаляем при любом исходе транскрибации.
+            if python transcribe.py "$temp_audio" --out "$out" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"; then
+                ((++ok))
+            else
+                echo "!! Ошибка обработки $(basename "$f")"
+                ((++failed))
+            fi
+            rm -f "$temp_audio"
         else
             echo "!! Ошибка: не удалось извлечь аудио из $(basename "$f")"
             rm -f "$temp_audio"
-            ((failed++))
+            ((++failed))
             continue
         fi
     else
         # Работа с изначальным mp3
-        python transcribe.py "$f" --out "$out" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"
-    fi
-
-    # transcribe.py завершается ненулевым кодом при любой ошибке
-    if [ $? -eq 0 ]; then
-        ((ok++))
-    else
-        echo "!! Ошибка обработки $(basename "$f")"
-        ((failed++))
+        if python transcribe.py "$f" --out "$out" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"; then
+            ((++ok))
+        else
+            echo "!! Ошибка обработки $(basename "$f")"
+            ((++failed))
+        fi
     fi
 done
 
