@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
+from typing import Any
 
 
 def cache_key(audio_path: str, *parts: object) -> str:
@@ -28,11 +29,15 @@ class StageCache:
     cache_dir: str | None
     key: str
 
-    def load(self, stage: str) -> list[dict] | None:
+    def load(self, stage: str) -> Any | None:
         """Прочитать сохранённый результат этапа; None, если кэша нет.
 
         Битый JSON (прерванная запись) трактуем как отсутствие кэша:
         этап просто пересчитается, вместо падения прогона трейсбэком.
+
+        Формат зависит от этапа: диаризация — список интервалов; whisper —
+        dict {"duration", "words"} (кэши старых версий — голый список слов,
+        читается без ошибок).
         """
         if self.cache_dir is None:
             return None
@@ -45,7 +50,7 @@ class StageCache:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
 
-    def save(self, stage: str, data: list[dict]) -> None:
+    def save(self, stage: str, data: Any) -> None:
         """Сохранить результат этапа; каталог создаётся при необходимости."""
         if self.cache_dir is None:
             return

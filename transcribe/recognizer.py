@@ -34,8 +34,14 @@ def transcribe_whisper(
     started = time.perf_counter()
     cached = cache.load("whisper")
     if cached is not None:
-        ok_line(f"Whisper: кэш, {len(cached)} слов")
-        return cached, time.perf_counter() - started, None
+        # Кэши до версии с длительностью — голый список слов: длительность
+        # аудио неизвестна, сводка посчитает её от последнего слова.
+        if isinstance(cached, dict):
+            words, cached_duration = cached["words"], cached["duration"]
+        else:
+            words, cached_duration = cached, None
+        ok_line(f"Распознавание: кэш, {len(words)} слов")
+        return words, time.perf_counter() - started, cached_duration
 
     from faster_whisper import WhisperModel
 
@@ -68,5 +74,8 @@ def transcribe_whisper(
     lang = f"{info.language} ({info.language_probability:.0%})"
     ok_line(f"{len(words)} слов · язык {lang} · {fmt_mmss(elapsed)}")
 
-    cache.save("whisper", words)
+    # duration сохраняем вместе со словами: без неё повторный запуск по
+    # кэшу считал бы длительность аудио от последнего слова, и сводка
+    # расходилась бы с первым запуском.
+    cache.save("whisper", {"duration": info.duration, "words": words})
     return words, elapsed, info.duration
