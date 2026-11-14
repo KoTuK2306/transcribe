@@ -177,35 +177,12 @@ def torch_device(index: int) -> Any:
     return torch.device(f"cuda:{index}")
 
 
-def diarize(
-    path: str,
-    hf_token: str | None,
-    device: str,
-    cache: StageCache,
-    min_speakers: int | None = None,
-    max_speakers: int | None = None,
-) -> tuple[list[dict], float]:
-    """Определить спикеров и вернуть (интервалы, длительность_этапа).
+def load_diarization_pipeline(hf_token: str, device: str) -> Any:
+    """Загрузить пайплайн диаризации; sys.exit с подсказкой при ошибке.
 
-    Каждый интервал — dict {start, end, speaker} с непересекающимися
-    отрезками одного спикера. min_speakers/max_speakers передаются в
-    пайплайн как есть (None = авто): на длинных записях pyannote склонен
-    дробить спикеров на лишние кластеры, и ограничение числа спикеров —
-    самое надёжное лекарство. Патчи совместимости применяются здесь,
-    непосредственно перед импортом pyannote (см. требования к порядку).
+    Патчи совместимости применяются здесь, непосредственно перед импортом
+    pyannote (см. требования к порядку в patch_torch_load_for_pyannote).
     """
-    started = time.perf_counter()
-    cached = cache.load("diarization")
-    if cached is not None:
-        ok_line(f"Диаризация: кэш, {len(cached)} фрагментов")
-        return cached, time.perf_counter() - started
-
-    if not hf_token:
-        sys.exit(
-            f"{red('Ошибка:')} не задан токен HuggingFace "
-            "(переменная HF_TOKEN или аргумент --hf-token)"
-        )
-
     register_ffmpeg_dll_dirs()
     patch_torchaudio_for_pyannote3()
     patch_torch_load_for_pyannote()
@@ -261,6 +238,38 @@ def diarize(
                 f"{red('Ошибка переноса пайплайна на GPU:')} {type(exc).__name__}: {exc}\n"
                 f"        Похоже на нехватку VRAM — попробуйте --device cpu"
             )
+    return pipeline
+
+
+def diarize(
+    path: str,
+    hf_token: str | None,
+    device: str,
+    cache: StageCache,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> tuple[list[dict], float]:
+    """Определить спикеров и вернуть (интервалы, длительность_этапа).
+
+    Каждый интервал — dict {start, end, speaker} с непересекающимися
+    отрезками одного спикера. min_speakers/max_speakers передаются в
+    пайплайн как есть (None = авто): на длинных записях pyannote склонен
+    дробить спикеров на лишние кластеры, и ограничение числа спикеров —
+    самое надёжное лекарство.
+    """
+    started = time.perf_counter()
+    cached = cache.load("diarization")
+    if cached is not None:
+        ok_line(f"Диаризация: кэш, {len(cached)} фрагментов")
+        return cached, time.perf_counter() - started
+
+    if not hf_token:
+        sys.exit(
+            f"{red('Ошибка:')} не задан токен HuggingFace "
+            "(переменная HF_TOKEN или аргумент --hf-token)"
+        )
+
+    pipeline = load_diarization_pipeline(hf_token, device)
 
     print(f"        {dim('Этапы пайплайна:')}")
     speaker_count_kwargs: dict[str, int] = {}
