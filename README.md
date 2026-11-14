@@ -6,6 +6,7 @@
   На выходе — текстовый файл с репликами и таймкодами.</p>
   <img src="https://img.shields.io/static/v1?label=python&message=3.10-3.13&color=blue" alt="Python 3.10–3.13">
   <img src="https://img.shields.io/static/v1?label=platform&message=Windows%20%7C%20Linux%20%7C%20macOS&color=lightgrey" alt="Платформы: Windows, Linux, macOS">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </div>
 
 Пример фрагмента результата:
