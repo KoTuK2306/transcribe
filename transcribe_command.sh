@@ -7,7 +7,7 @@
 # Токен: https://huggingface.co/settings/tokens (тип Read);
 # также нужно принять условия gated-моделей pyannote (см. README.md).
 
-# Работаем в папке скрипта: отсюда берутся .env и обрабатываемые файлы,
+# Работаем в папке скрипта: отсюда берутся .env и папки input/output,
 # независимо от того, откуда запущен скрипт.
 cd "$(dirname "$0")" || exit 1
 
@@ -29,6 +29,12 @@ fi
 MIN_SPEAKERS=2      # минимальное число спикеров (пусто = авто: MIN_SPEAKERS="")
 MAX_SPEAKERS=2      # максимальное число спикеров (пусто = авто: MAX_SPEAKERS="")
 
+# Файлы для обработки берутся из input/, готовые транскрипты пишутся
+# в output/ под именем исходника: input/meeting.mp3 → output/meeting.txt
+INPUT_DIR="input"
+OUTPUT_DIR="output"
+mkdir -p "$INPUT_DIR" "$OUTPUT_DIR"
+
 # Собираем аргументы для transcribe.py из настроек выше
 SPEAKER_ARGS=()
 [ -n "$MIN_SPEAKERS" ] && SPEAKER_ARGS+=(--min-speakers "$MIN_SPEAKERS")
@@ -39,41 +45,53 @@ SPEAKER_ARGS=()
 # Включаем игнорирование регистра при поиске файлов (.mp3, .MP3, .mp4, .MP4)
 shopt -s nullglob nocaseglob
 
+# Список файлов фиксируем до цикла: временный mp3 из MP4 не должен
+# попасть в обработку повторно.
+files=("$INPUT_DIR"/*.mp3 "$INPUT_DIR"/*.mp4)
+
+if [ ${#files[@]} -eq 0 ]; then
+    echo "В папке $INPUT_DIR/ нет mp3/mp4 — положите туда файлы для транскрибации."
+    exit 0
+fi
+
 ok=0       # файлов успешно обработано
 failed=0   # файлов с ошибкой
 
-for f in *.mp3 *.mp4; do
+for f in "${files[@]}"; do
     # Очищаем экран только при интерактивном запуске: при перенаправлении
     # вывода в файл escape-последовательности clear засорили бы его.
     [ -t 1 ] && clear
-    echo "=== $f ==="
+    echo "=== $(basename "$f") ==="
+
+    name="$(basename "${f%.*}")"
+    out="$OUTPUT_DIR/$name.txt"
 
     # Проверяем, является ли файл видео (приводим имя к нижнему регистру)
     if [[ "${f,,}" == *.mp4 ]]; then
         # Если это MP4, сначала извлекаем аудио
-        temp_audio="temp_${f%.*}.mp3"
+        temp_audio="$INPUT_DIR/temp_$name.mp3"
         echo ">> Извлечение аудио из видео..."
         # Успех проверяем по коду возврата ffmpeg, а не по факту файла:
         # прерванное извлечение оставляет битый частичный mp3.
         if ffmpeg -y -i "$f" -vn -acodec libmp3lame -q:a 2 "$temp_audio" -loglevel error; then
-            python transcribe.py "$temp_audio" --out "${f%.*}.txt" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"
+            python transcribe.py "$temp_audio" --out "$out" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"
             rm -f "$temp_audio" # Удаляем временный файл
         else
-            echo "!! Ошибка: не удалось извлечь аудио из $f"
+            echo "!! Ошибка: не удалось извлечь аудио из $(basename "$f")"
             rm -f "$temp_audio"
             ((failed++))
             continue
         fi
     else
         # Работа с изначальным mp3
-        python transcribe.py "$f" --out "${f%.*}.txt" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"
+        python transcribe.py "$f" --out "$out" --language ru --device cuda --compute-type float16 "${SPEAKER_ARGS[@]}"
     fi
 
     # transcribe.py завершается ненулевым кодом при любой ошибке
     if [ $? -eq 0 ]; then
         ((ok++))
     else
-        echo "!! Ошибка обработки $f"
+        echo "!! Ошибка обработки $(basename "$f")"
         ((failed++))
     fi
 done
@@ -81,7 +99,7 @@ done
 echo
 echo "════════════════════════════════════════"
 echo "  Обработано: $ok · Ошибок: $failed"
-echo "  Транскрипты сохранены рядом с файлами: <имя>.txt"
+echo "  Транскрипты сохранены в папке $OUTPUT_DIR/: <имя>.txt"
 if [ "$failed" -gt 0 ]; then
     exit 1
 fi
